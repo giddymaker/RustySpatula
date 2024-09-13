@@ -1,6 +1,9 @@
 #!/usr/bin/python
-import sys
+
+import hashlib
+import itertools
 import argparse
+import sys
 
 def parse_ntds_file(ntds_file):
     """Parse the NTDS.dit file and return dictionaries for LM hashes and NT hashes."""
@@ -86,17 +89,59 @@ def reassemble_lm_potfile(potfile):
 
     return reassembled_entries
 
+def calculate_nt_hash(password):
+    """Calculate the NT hash for a given password."""
+    nt_hash = hashlib.new('md4', password.encode('utf-16le')).hexdigest()
+    return nt_hash.lower()
+
+def generate_case_variations(password):
+    """Generate all unique case variations of the given password."""
+    variations = set(''.join(chars) for chars in itertools.product(*([char.lower(), char.upper()] for char in password)))
+    return list(variations)
+
+def match_nt_hashes(nt_hash_map, reassembled_lm_hash_password_map):
+    """Match NT hashes with LM passwords' case variations."""
+    found_matches = 0
+    #print("NT Hash Map Contents:")
+    #for nt_hash in nt_hash_map:
+        #print(f"NT Hash: {nt_hash}")
+
+    for lm_hash, full_password in reassembled_lm_hash_password_map.items():
+        #print(f"Processing password: {full_password} (LM Hash: {lm_hash})")  # Debugging statement
+        #print(f"Generating case variations for LM password: {full_password}")
+        variations = generate_case_variations(full_password)  # Generate variations
+        #print(f"Generated {len(variations)} variations for LM password '{full_password}': {variations[:5]}...")
+
+        for variation in variations:
+            hashed_variation = calculate_nt_hash(variation)
+            #print(f"Trying variation: {variation} -> NT Hash: {hashed_variation}")  # Debugging statement
+            if hashed_variation in nt_hash_map:  # Check if hash is in nt_hash_map
+                print(f"{hashed_variation}:{variation}")
+                found_matches += 1
+                break  # Break once a match is found to avoid redundant checks
+    if found_matches == 0:
+        print("No matches found.")
+    #else:
+        #print(f"{found_matches} NT hash matches found.")
+
+
 def main(args):
     if args.split_lm:
-        #print("Splitting LM hashes...")
         lm_hash_map, _ = parse_ntds_file(args.ntds_file)  # Only load the NTDS file for LM hashes
         split_lm_hashes(lm_hash_map)
+        return
+
+
+    if args.lm2nt:
+        _, nt_hash_map = parse_ntds_file(args.ntds_file)  # Potfile should contain NT hashes
+        reassembled_entries = reassemble_lm_potfile(args.potfile)
+        reassembled_lm_hash_password_map = {hash: password for hash, password in reassembled_entries}
+        match_nt_hashes(nt_hash_map, reassembled_lm_hash_password_map)
         return
 
     lm_hash_map, nt_hash_map = parse_ntds_file(args.ntds_file)
     
     if args.lmuser_pw:
-        #print("Matching LM hashes with passwords...")
         reassembled_entries = reassemble_lm_potfile(args.potfile)
         lm_hash_password_map = {hash: password for hash, password in reassembled_entries}
         found = False
@@ -112,7 +157,7 @@ def main(args):
             print("No matches found for LM hashes.")
 
     elif args.ntuser_pw:
-        #print("Matching NT hashes with passwords...")
+
         hash_password_map = parse_potfile(args.potfile)
         found = False
         for nt_hash, usernames in nt_hash_map.items():
@@ -127,13 +172,12 @@ def main(args):
             print("No matches found for NT hashes.")
 
     elif args.nthash_lmpw:
-        #print("Matching NT hashes with LM passwords...")
         reassembled_entries = reassemble_lm_potfile(args.potfile)
-        lm_hash_password_map = {hash: password for hash, password in reassembled_entries}
+        reassembled_lm_hash_password_map = {hash: password for hash, password in reassembled_entries}
         found = False
         for lm_hash, usernames in lm_hash_map.items():
-            if lm_hash in lm_hash_password_map:
-                password = lm_hash_password_map[lm_hash]
+            if lm_hash in reassembled_lm_hash_password_map:
+                password = reassembled_lm_hash_password_map[lm_hash]
                 nt_hashes = [nt_hash for nt_hash, user in nt_hash_map.items() if user == usernames]
                 for nt_hash in nt_hashes:
                     print(f"{nt_hash}:::::{password}")
@@ -145,9 +189,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Match NTDS data with cracked passwords from a potfile.")
     parser.add_argument("ntds_file", help="Path to the NTDS.dit file.")
     parser.add_argument("potfile", nargs='?', help="Path to the potfile containing hashes and passwords (optional, required for --lmuser-pw, --ntuser-pw, --nthash-lmpw).")
-    parser.add_argument("--lmuser-pw", action="store_true", help="Match LM hashes with passwords.")
+    parser.add_argument("--lmuser-pw", action="store_true", help="Match LM hashes with passwords. Input the raw hashcat potfile, not the reassembled version.")
     parser.add_argument("--ntuser-pw", action="store_true", help="Match NT hashes with passwords.")
-    parser.add_argument("--nthash-lmpw", action="store_true", help="Match NT hashes with passwords from LM hashes. Input the raw hashcat potfile, not the reassembled version")
+    parser.add_argument("--lm2nt", action="store_true", help="Find matching NT hashes from NTDS extract and LM potfile from hashcat")
+    parser.add_argument("--nthash-lmpw", action="store_true", help="Match NT hashes with passwords from LM hashes. Input the raw hashcat potfile, not the reassembled version.")
     parser.add_argument("--fix-lm", action="store", help="Reassemble LM hashes from the potfile.", metavar="LM_POTFILE")
     parser.add_argument("--split-lm", action="store_true", help="Split 32-character LM hashes into two halves from NTDS.dit extract and output the result.")
     
@@ -156,16 +201,16 @@ if __name__ == "__main__":
     if args.fix_lm or args.split_lm:
         main(args)
     else:
-        if not (args.lmuser_pw or args.ntuser_pw or args.nthash_lmpw or args.split_lm):
-            print("Error: You must specify either --lmuser-pw, --ntuser-pw, --nthash-lmpw, or --split-lm.")
+        if not (args.lmuser_pw or args.ntuser_pw or args.nthash_lmpw or args.split_lm or args.lm2nt):
+            print("Error: You must specify either --lmuser-pw, --ntuser-pw, --nthash-lmpw, --split-lm, or --lm2nt.")
             sys.exit(1)
         
-        if (args.lmuser_pw and args.ntuser_pw) or (args.lmuser_pw and args.nthash_lmpw) or (args.ntuser_pw and args.nthash_lmpw):
+        if (args.lmuser_pw and args.ntuser_pw) or (args.lmuser_pw and args.nthash_lmpw) or (args.lmuser_pw and args.lm2nt) or (args.ntuser_pw and args.nthash_lmpw) or (args.ntuser_pw and args.lm2nt) or (args.nthash_lmpw and args.lm2nt):
             print("Error: You cannot specify conflicting options.")
             sys.exit(1)
         
         if not args.potfile:
-            print("Error: Potfile is required for --lmuser-pw, --ntuser-pw, or --nthash-lmpw.")
+            print("Error: Potfile is required for --lmuser-pw, --ntuser-pw, --nthash-lmpw, or --lm2nt.")
             sys.exit(1)
 
         main(args)
